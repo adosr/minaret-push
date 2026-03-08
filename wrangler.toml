@@ -1,6 +1,9 @@
 name = "minaret-push"
 main = "worker.js"
 compatibility_date = "2026-03-07"
-
-
 compatibility_flags = ["nodejs_compat"]
+
+[[kv_namespaces]]
+binding = "SUBSCRIPTIONS"
+id = "4416027386f5406db5fa6d95e85a194b"
+
