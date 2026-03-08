@@ -147,7 +147,7 @@ async function runScheduled(env) {
 
     const now = new Date();
     const prayerData = calculatePrayerTimesForRecord(now, record);
-    const duePrayer = getDuePrayer(prayerData, now, record.lastSent);
+    const duePrayer = getDuePrayer(prayerData, now, record.timezone, record.lastSent);
 
     if (!duePrayer) continue;
 
@@ -232,8 +232,8 @@ function calculatePrayerTimesForRecord(now, record) {
   };
 }
 
-function getDuePrayer(prayerData, now, lastSent) {
-  const current = getCurrentMinuteInZone(now, prayerData.dateKey);
+function getDuePrayer(prayerData, now, timeZone, lastSent) {
+  const current = getCurrentMinuteInZone(now, timeZone);
 
   for (const prayer of ["fajr", "dhuhr", "asr", "maghrib", "isha"]) {
     const target = prayerData.minutes[prayer];
@@ -255,14 +255,8 @@ function getDuePrayer(prayerData, now, lastSent) {
   return null;
 }
 
-function getCurrentMinuteInZone(now, dateKey) {
-  const [y, m, d] = dateKey.split("-").map(Number);
-  const parts = getZonedDateTimeParts(
-    now,
-    Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-    y, m, d
-  );
-
+function getCurrentMinuteInZone(now, timeZone) {
+  const parts = getZonedDateTimeParts(now, timeZone);
   return parts.hour * 60 + parts.minute;
 }
 
@@ -449,4 +443,5 @@ function fixAngle(a) {
 
 function fixHour(h) {
   return (h % 24 + 24) % 24;
+
 }
