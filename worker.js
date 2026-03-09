@@ -43,18 +43,19 @@ async function handleRequest(request, env, ctx) {
 
     const key = await subscriptionKey(body.subscription.endpoint);
 
-    const record = {
-      subscription: body.subscription,
-      lat: body.lat ?? null,
-      lon: body.lon ?? null,
-      timezone: body.timezone ?? null,
-      name: body.name ?? null,
-      settings: body.settings ?? {},
-      userAgent: body.userAgent ?? null,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      lastSent: null,
-    };
+const record = {
+  subscription: body.subscription,
+  lat: body.lat ?? null,
+  lon: body.lon ?? null,
+  timezone: body.timezone ?? null,
+  language: body.language ?? null,
+  name: body.name ?? null,
+  settings: body.settings ?? {},
+  userAgent: body.userAgent ?? null,
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+  lastSent: null,
+};
 
     await env.SUBSCRIPTIONS.put(key, JSON.stringify(record));
 
@@ -227,35 +228,36 @@ async function handleRequest(request, env, ctx) {
   }
   }
 
-  if (request.method === "GET" && url.pathname === "/admin/subscribers") {
-    const list = await env.SUBSCRIPTIONS.list({ prefix: "sub:", limit: 1000 });
-    const subscribers = [];
+if (request.method === "GET" && url.pathname === "/admin/subscribers") {
+  const list = await env.SUBSCRIPTIONS.list({ prefix: "sub:", limit: 1000 });
+  const subscribers = [];
 
-    for (const item of list.keys) {
-      const raw = await env.SUBSCRIPTIONS.get(item.name);
-      if (!raw) continue;
+  for (const item of list.keys) {
+    const raw = await env.SUBSCRIPTIONS.get(item.name);
+    if (!raw) continue;
 
-      try {
-        const record = JSON.parse(raw);
-        subscribers.push({
-          endpoint: record.subscription?.endpoint || null,
-          name: record.name || null,
-          language: record.language || null,
-          timezone: record.timezone || null,
-          createdAt: record.createdAt || null,
-          lastSent: record.lastSent || null,
-          customAttributes: record.customAttributes || null,
-        });
-      } catch {
-        // ignore bad record
-      }
+    try {
+      const record = JSON.parse(raw);
+      subscribers.push({
+        endpoint: record.subscription?.endpoint || null,
+        name: record.name || null,
+        language: record.language || null,
+        timezone: record.timezone || null,
+        userAgent: record.userAgent || null,
+        createdAt: record.createdAt || null,
+        lastSent: record.lastSent || null,
+        customAttributes: record.customAttributes || null,
+      });
+    } catch {
+      // ignore bad record
     }
-
-    return json({
-      ok: true,
-      subscribers,
-    });
   }
+
+  return json({
+    ok: true,
+    subscribers,
+  });
+}
   
   return json({ error: "Not found" }, 404);
 }
@@ -726,3 +728,4 @@ function zonedLocalToUtcIso(localDateTimeString, timeZone) {
   return new Date(utcMillis).toISOString();
 
 }
+
