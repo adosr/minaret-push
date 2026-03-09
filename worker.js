@@ -43,19 +43,19 @@ async function handleRequest(request, env, ctx) {
 
     const key = await subscriptionKey(body.subscription.endpoint);
 
-const record = {
-  subscription: body.subscription,
-  lat: body.lat ?? null,
-  lon: body.lon ?? null,
-  timezone: body.timezone ?? null,
-  language: body.language ?? null,
-  name: body.name ?? null,
-  settings: body.settings ?? {},
-  userAgent: body.userAgent ?? null,
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-  lastSent: null,
-};
+    const record = {
+      subscription: body.subscription,
+      lat: body.lat ?? null,
+      lon: body.lon ?? null,
+      timezone: body.timezone ?? null,
+      language: body.language ?? null,
+      name: body.name ?? null,
+      settings: body.settings ?? {},
+      userAgent: body.userAgent ?? null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      lastSent: null,
+    };
 
     await env.SUBSCRIPTIONS.put(key, JSON.stringify(record));
 
@@ -85,7 +85,7 @@ const record = {
   }
 
   if (request.method === "GET" && url.pathname === "/subscriptions-count") {
-    const list = await env.SUBSCRIPTIONS.list({ limit: 1000 });
+    const list = await env.SUBSCRIPTIONS.list({ prefix: "sub:", limit: 1000 });
     return json({
       ok: true,
       count: list.keys.length,
@@ -108,7 +108,26 @@ const record = {
       return json({ error: "Subscription not found" }, 404);
     }
 
-    if (request.method === "GET" && url.pathname === "/admin/summary") {
+    const record = JSON.parse(raw);
+
+    await sendPush(env, record.subscription, {
+      title: "اختبار Web Push",
+      options: {
+        body: "إذا وصل هذا الإشعار والتطبيق مغلق فكل شيء ممتاز.",
+        icon: "./icons/icon-192.png",
+        badge: "./icons/icon-192.png",
+        tag: "test-push",
+        renotify: false,
+      },
+    });
+
+    return json({
+      ok: true,
+      message: "Test push sent",
+    });
+  }
+
+  if (request.method === "GET" && url.pathname === "/admin/summary") {
     const subs = await env.SUBSCRIPTIONS.list({ prefix: "sub:", limit: 1000 });
     const jobs = await env.SUBSCRIPTIONS.list({ prefix: "job:", limit: 1000 });
 
@@ -119,6 +138,37 @@ const record = {
       jobs: jobs.keys.length,
       jobs_complete: jobs.list_complete,
       now_utc: new Date().toISOString(),
+    });
+  }
+
+  if (request.method === "GET" && url.pathname === "/admin/subscribers") {
+    const list = await env.SUBSCRIPTIONS.list({ prefix: "sub:", limit: 1000 });
+    const subscribers = [];
+
+    for (const item of list.keys) {
+      const raw = await env.SUBSCRIPTIONS.get(item.name);
+      if (!raw) continue;
+
+      try {
+        const record = JSON.parse(raw);
+        subscribers.push({
+          endpoint: record.subscription?.endpoint || null,
+          name: record.name || null,
+          language: record.language || null,
+          timezone: record.timezone || null,
+          userAgent: record.userAgent || null,
+          createdAt: record.createdAt || null,
+          lastSent: record.lastSent || null,
+          customAttributes: record.customAttributes || null,
+        });
+      } catch {
+        // ignore bad record
+      }
+    }
+
+    return json({
+      ok: true,
+      subscribers,
     });
   }
 
@@ -226,39 +276,7 @@ const record = {
       record,
     });
   }
-  }
 
-if (request.method === "GET" && url.pathname === "/admin/subscribers") {
-  const list = await env.SUBSCRIPTIONS.list({ prefix: "sub:", limit: 1000 });
-  const subscribers = [];
-
-  for (const item of list.keys) {
-    const raw = await env.SUBSCRIPTIONS.get(item.name);
-    if (!raw) continue;
-
-    try {
-      const record = JSON.parse(raw);
-      subscribers.push({
-        endpoint: record.subscription?.endpoint || null,
-        name: record.name || null,
-        language: record.language || null,
-        timezone: record.timezone || null,
-        userAgent: record.userAgent || null,
-        createdAt: record.createdAt || null,
-        lastSent: record.lastSent || null,
-        customAttributes: record.customAttributes || null,
-      });
-    } catch {
-      // ignore bad record
-    }
-  }
-
-  return json({
-    ok: true,
-    subscribers,
-  });
-}
-  
   return json({ error: "Not found" }, 404);
 }
 
@@ -728,4 +746,5 @@ function zonedLocalToUtcIso(localDateTimeString, timeZone) {
   return new Date(utcMillis).toISOString();
 
 }
+
 
