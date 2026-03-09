@@ -126,7 +126,7 @@ async function handleRequest(request, env, ctx) {
 
     const mode = body?.mode || "now";
     const target = body?.target || "all";
-    const endpoint = body?.endpoint || null;
+    const endpoints = Array.isArray(body?.endpoints) ? body.endpoints : [];
     const language = body?.language || "ar";
     const timezone = body?.timezone || "UTC";
     const title = body?.title || (language === "ar" ? "إشعار يدوي" : "Manual Push");
@@ -147,7 +147,7 @@ async function handleRequest(request, env, ctx) {
     };
 
     if (mode === "now") {
-      const sent = await sendManualPushNow(env, { target, endpoint, payload });
+      const sent = await sendManualPushNow(env, { target, endpoints, payload });
       return json({
         ok: true,
         mode,
@@ -166,7 +166,7 @@ async function handleRequest(request, env, ctx) {
       type: "manual-push",
       status: "pending",
       target,
-      endpoint,
+      endpoints,
       language,
       timezone,
       dueAt,
@@ -227,6 +227,36 @@ async function handleRequest(request, env, ctx) {
   }
   }
 
+  if (request.method === "GET" && url.pathname === "/admin/subscribers") {
+    const list = await env.SUBSCRIPTIONS.list({ prefix: "sub:", limit: 1000 });
+    const subscribers = [];
+
+    for (const item of list.keys) {
+      const raw = await env.SUBSCRIPTIONS.get(item.name);
+      if (!raw) continue;
+
+      try {
+        const record = JSON.parse(raw);
+        subscribers.push({
+          endpoint: record.subscription?.endpoint || null,
+          name: record.name || null,
+          language: record.language || null,
+          timezone: record.timezone || null,
+          createdAt: record.createdAt || null,
+          lastSent: record.lastSent || null,
+          customAttributes: record.customAttributes || null,
+        });
+      } catch {
+        // ignore bad record
+      }
+    }
+
+    return json({
+      ok: true,
+      subscribers,
+    });
+  }
+  
   return json({ error: "Not found" }, 404);
 }
 
@@ -549,30 +579,41 @@ function fixHour(h) {
 
 }
 
-async function sendManualPushNow(env, { target, endpoint, payload }) {
+async function sendManualPushNow(env, { target, endpoints, payload }) {
   let sent = 0;
 
-  if (target === "single") {
-    if (!endpoint) throw new Error("Missing endpoint for single target");
+  if (target === "selected") {
+    if (!Array.isArray(endpoints) || endpoints.length === 0) {
+      throw new Error("Missing endpoints for selected target");
+    }
 
-    const key = await subscriptionKey(endpoint);
-    const raw = await env.SUBSCRIPTIONS.get(key);
-    if (!raw) throw new Error("Subscription not found");
+    for (const endpoint of endpoints) {
+      const key = await subscriptionKey(endpoint);
+      const raw = await env.SUBSCRIPTIONS.get(key);
+      if (!raw) continue;
 
-    const record = JSON.parse(raw);
-    await sendPush(env, record.subscription, payload);
+      try {
+        const record = JSON.parse(raw);
+        await sendPush(env, record.subscription, payload);
 
-    record.lastSent = {
-      prayer: "manual",
-      date: localDateKey(new Date()),
-      sentAt: new Date().toISOString(),
-    };
-    await env.SUBSCRIPTIONS.put(key, JSON.stringify(record));
-    sent += 1;
+        record.lastSent = {
+          prayer: "manual",
+          date: localDateKey(new Date()),
+          sentAt: new Date().toISOString(),
+        };
+        await env.SUBSCRIPTIONS.put(key, JSON.stringify(record));
+        sent += 1;
+      } catch (error) {
+        const msg = String(error?.message || error);
+        if (msg.includes("410") || msg.includes("404")) {
+          await env.SUBSCRIPTIONS.delete(key);
+        }
+      }
+    }
 
     console.log("Manual push sent", {
-      target: "single",
-      endpoint,
+      target: "selected",
+      sent,
       sentAt: new Date().toISOString(),
     });
 
@@ -641,7 +682,7 @@ async function processManualJobs(env) {
     try {
       const sent = await sendManualPushNow(env, {
         target: job.target || "all",
-        endpoint: job.endpoint || null,
+        endpoints: Array.isArray(job.endpoints) ? job.endpoints : [],
         payload: job.payload,
       });
 
@@ -683,4 +724,5 @@ function zonedLocalToUtcIso(localDateTimeString, timeZone) {
   const utcMillis = Date.UTC(year, month - 1, day, hour, minute, 0) - (offsetMinutes * 60000);
 
   return new Date(utcMillis).toISOString();
+
 }
