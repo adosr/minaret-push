@@ -107,30 +107,133 @@ async function handleRequest(request, env, ctx) {
       return json({ error: "Subscription not found" }, 404);
     }
 
-    const record = JSON.parse(raw);
-
-    await sendPush(env, record.subscription, {
-      title: "اختبار Web Push",
-      options: {
-        body: "إذا وصل هذا الإشعار والتطبيق مغلق فكل شيء ممتاز.",
-        icon: "./icons/icon-192.png",
-        badge: "./icons/icon-192.png",
-        tag: "test-push",
-        renotify: false,
-      },
-    });
+    if (request.method === "GET" && url.pathname === "/admin/summary") {
+    const subs = await env.SUBSCRIPTIONS.list({ prefix: "sub:", limit: 1000 });
+    const jobs = await env.SUBSCRIPTIONS.list({ prefix: "job:", limit: 1000 });
 
     return json({
       ok: true,
-      message: "Test push sent",
+      subscriptions: subs.keys.length,
+      subscriptions_complete: subs.list_complete,
+      jobs: jobs.keys.length,
+      jobs_complete: jobs.list_complete,
+      now_utc: new Date().toISOString(),
     });
+  }
+
+  if (request.method === "POST" && url.pathname === "/admin/manual-push") {
+    const body = await safeJson(request);
+
+    const mode = body?.mode || "now";
+    const target = body?.target || "all";
+    const endpoint = body?.endpoint || null;
+    const language = body?.language || "ar";
+    const timezone = body?.timezone || "UTC";
+    const title = body?.title || (language === "ar" ? "إشعار يدوي" : "Manual Push");
+    const bodyText = body?.body || "";
+    const scheduleAtLocal = body?.scheduleAtLocal || null;
+    const extraOptions = body?.extraOptions || {};
+
+    const payload = {
+      title,
+      options: {
+        body: bodyText,
+        icon: "./icons/icon-192.png",
+        badge: "./icons/icon-192.png",
+        tag: `manual-${Date.now()}`,
+        renotify: false,
+        ...extraOptions,
+      },
+    };
+
+    if (mode === "now") {
+      const sent = await sendManualPushNow(env, { target, endpoint, payload });
+      return json({
+        ok: true,
+        mode,
+        target,
+        sent,
+      });
+    }
+
+    if (!scheduleAtLocal) {
+      return json({ error: "scheduleAtLocal is required for scheduled mode" }, 400);
+    }
+
+    const dueAt = zonedLocalToUtcIso(scheduleAtLocal, timezone);
+
+    const job = {
+      type: "manual-push",
+      status: "pending",
+      target,
+      endpoint,
+      language,
+      timezone,
+      dueAt,
+      payload,
+      createdAt: new Date().toISOString(),
+      sentAt: null,
+    };
+
+    const jobId = `job:${crypto.randomUUID()}`;
+    await env.SUBSCRIPTIONS.put(jobId, JSON.stringify(job));
+
+    return json({
+      ok: true,
+      mode,
+      jobId,
+      dueAt,
+    });
+  }
+
+  if (request.method === "POST" && url.pathname === "/admin/patch-subscriber") {
+    const body = await safeJson(request);
+    const endpoint = body?.endpoint;
+    const patch = body?.patch || {};
+
+    if (!endpoint) {
+      return json({ error: "Missing endpoint" }, 400);
+    }
+
+    const key = await subscriptionKey(endpoint);
+    const raw = await env.SUBSCRIPTIONS.get(key);
+
+    if (!raw) {
+      return json({ error: "Subscription not found" }, 404);
+    }
+
+    const record = JSON.parse(raw);
+
+    if (patch.name !== undefined && patch.name !== null) record.name = patch.name;
+    if (patch.language !== undefined && patch.language !== null) record.language = patch.language;
+    if (patch.timezone !== undefined && patch.timezone !== null) record.timezone = patch.timezone;
+    if (patch.lat !== undefined && patch.lat !== null) record.lat = patch.lat;
+    if (patch.lon !== undefined && patch.lon !== null) record.lon = patch.lon;
+    if (patch.settings !== undefined && patch.settings !== null) record.settings = patch.settings;
+    if (patch.customAttributes !== undefined && patch.customAttributes !== null) {
+      record.customAttributes = patch.customAttributes;
+    }
+
+    record.updatedAt = new Date().toISOString();
+
+    await env.SUBSCRIPTIONS.put(key, JSON.stringify(record));
+
+    return json({
+      ok: true,
+      key,
+      message: "Subscriber patched",
+      record,
+    });
+  }
   }
 
   return json({ error: "Not found" }, 404);
 }
 
 async function runScheduled(env) {
-  const list = await env.SUBSCRIPTIONS.list({ limit: 1000 });
+  await processManualJobs(env);
+
+  const list = await env.SUBSCRIPTIONS.list({ prefix: "sub:", limit: 1000 });
 
   for (const item of list.keys) {
     const raw = await env.SUBSCRIPTIONS.get(item.name);
@@ -444,4 +547,140 @@ function fixAngle(a) {
 function fixHour(h) {
   return (h % 24 + 24) % 24;
 
+}
+
+async function sendManualPushNow(env, { target, endpoint, payload }) {
+  let sent = 0;
+
+  if (target === "single") {
+    if (!endpoint) throw new Error("Missing endpoint for single target");
+
+    const key = await subscriptionKey(endpoint);
+    const raw = await env.SUBSCRIPTIONS.get(key);
+    if (!raw) throw new Error("Subscription not found");
+
+    const record = JSON.parse(raw);
+    await sendPush(env, record.subscription, payload);
+
+    record.lastSent = {
+      prayer: "manual",
+      date: localDateKey(new Date()),
+      sentAt: new Date().toISOString(),
+    };
+    await env.SUBSCRIPTIONS.put(key, JSON.stringify(record));
+    sent += 1;
+
+    console.log("Manual push sent", {
+      target: "single",
+      endpoint,
+      sentAt: new Date().toISOString(),
+    });
+
+    return sent;
+  }
+
+  const list = await env.SUBSCRIPTIONS.list({ prefix: "sub:", limit: 1000 });
+
+  for (const item of list.keys) {
+    const raw = await env.SUBSCRIPTIONS.get(item.name);
+    if (!raw) continue;
+
+    try {
+      const record = JSON.parse(raw);
+      if (!record?.subscription?.endpoint) continue;
+
+      await sendPush(env, record.subscription, payload);
+
+      record.lastSent = {
+        prayer: "manual",
+        date: localDateKey(new Date()),
+        sentAt: new Date().toISOString(),
+      };
+      await env.SUBSCRIPTIONS.put(item.name, JSON.stringify(record));
+
+      sent += 1;
+    } catch (error) {
+      const msg = String(error?.message || error);
+      if (msg.includes("410") || msg.includes("404")) {
+        await env.SUBSCRIPTIONS.delete(item.name);
+      }
+    }
+  }
+
+  console.log("Manual push sent", {
+    target: "all",
+    sent,
+    sentAt: new Date().toISOString(),
+  });
+
+  return sent;
+}
+
+async function processManualJobs(env) {
+  const jobs = await env.SUBSCRIPTIONS.list({ prefix: "job:", limit: 1000 });
+  const now = new Date();
+
+  for (const item of jobs.keys) {
+    const raw = await env.SUBSCRIPTIONS.get(item.name);
+    if (!raw) continue;
+
+    let job;
+    try {
+      job = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+
+    if (job?.status !== "pending") continue;
+    if (!job?.dueAt) continue;
+
+    const due = new Date(job.dueAt);
+    if (Number.isNaN(due.getTime())) continue;
+    if (due.getTime() > now.getTime()) continue;
+
+    try {
+      const sent = await sendManualPushNow(env, {
+        target: job.target || "all",
+        endpoint: job.endpoint || null,
+        payload: job.payload,
+      });
+
+      job.status = "sent";
+      job.sentAt = new Date().toISOString();
+      job.sentCount = sent;
+
+      await env.SUBSCRIPTIONS.put(item.name, JSON.stringify(job));
+
+      console.log("Scheduled manual push sent", {
+        jobId: item.name,
+        sent,
+        dueAt: job.dueAt,
+        sentAt: job.sentAt,
+      });
+    } catch (error) {
+      job.status = "failed";
+      job.error = String(error?.message || error);
+      job.sentAt = new Date().toISOString();
+
+      await env.SUBSCRIPTIONS.put(item.name, JSON.stringify(job));
+
+      console.log("Scheduled manual push failed", {
+        jobId: item.name,
+        error: job.error,
+        sentAt: job.sentAt,
+      });
+    }
+  }
+}
+
+function zonedLocalToUtcIso(localDateTimeString, timeZone) {
+  const [datePart, timePart] = localDateTimeString.split("T");
+  const [year, month, day] = datePart.split("-").map(Number);
+  const [hour, minute] = timePart.split(":").map(Number);
+
+  const guess = new Date(Date.UTC(year, month - 1, day, hour, minute, 0));
+  const offsetMinutes = getTimeZoneOffsetMinutes(timeZone, guess);
+  const utcMillis = Date.UTC(year, month - 1, day, hour, minute, 0) - (offsetMinutes * 60000);
+
+  return new Date(utcMillis).toISOString();
 }
