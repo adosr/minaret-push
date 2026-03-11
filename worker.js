@@ -34,37 +34,41 @@ async function handleRequest(request, env, ctx) {
     });
   }
 
-  if (request.method === "POST" && url.pathname === "/subscribe") {
-    const body = await safeJson(request);
+if (request.method === "POST" && url.pathname === "/subscribe") {
 
-    if (!body?.subscription?.endpoint) {
-      return json({ error: "Invalid subscription payload" }, 400);
-    }
+  const body = await safeJson(request);
 
-    const key = await subscriptionKey(body.subscription.endpoint);
-
-    const record = {
-      subscription: body.subscription,
-      lat: body.lat ?? null,
-      lon: body.lon ?? null,
-      timezone: body.timezone ?? null,
-      language: body.language ?? null,
-      name: body.name ?? null,
-      settings: body.settings ?? {},
-      userAgent: body.userAgent ?? null,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      lastSent: null,
-    };
-
-    await env.SUBSCRIPTIONS.put(key, JSON.stringify(record));
-
-    return json({
-      ok: true,
-      key,
-      message: "Subscription saved",
-    });
+  if (!body?.subscription?.endpoint) {
+    return json({ error: "Invalid subscription payload" }, 400);
   }
+
+  const subKey = await subscriptionKey(body.subscription.endpoint);
+
+  const record = {
+    subscription: body.subscription,
+    lat: body.lat ?? null,
+    lon: body.lon ?? null,
+    timezone: body.timezone ?? null,
+    language: body.language ?? "ar",
+    name: body.name ?? null,
+    userAgent: body.userAgent ?? null,
+    settings: body.settings ?? {},
+    customAttributes: body.customAttributes ?? {},
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    scheduleVersion: Date.now()
+  };
+
+  await env.SUBSCRIPTIONS.put(subKey, JSON.stringify(record));
+
+  // إنشاء buckets للـ 7 أيام القادمة
+  await buildInitialBuckets(env, record);
+
+  return json({
+    ok: true,
+    key: subKey
+  });
+}
 
   if (request.method === "POST" && url.pathname === "/unsubscribe") {
     const body = await safeJson(request);
@@ -281,55 +285,51 @@ async function handleRequest(request, env, ctx) {
 }
 
 async function runScheduled(env) {
-  await processManualJobs(env);
 
-  const list = await env.SUBSCRIPTIONS.list({ prefix: "sub:", limit: 1000 });
+  const now = new Date();
+  const bucketKey = bucketKeyFromDate(now);
 
-  for (const item of list.keys) {
-    const raw = await env.SUBSCRIPTIONS.get(item.name);
-    if (!raw) continue;
+  const raw = await env.SUBSCRIPTIONS.get(bucketKey);
 
-    let record;
-    try {
-      record = JSON.parse(raw);
-    } catch {
-      continue;
-    }
+  if (!raw) return;
 
-    if (!isValidRecord(record)) continue;
+  let entries;
 
-    const now = new Date();
-    const prayerData = calculatePrayerTimesForRecord(now, record);
-    const duePrayer = getDuePrayer(prayerData, now, record.timezone, record.lastSent);
+  try {
+    entries = JSON.parse(raw);
+  } catch {
+    await env.SUBSCRIPTIONS.delete(bucketKey);
+    return;
+  }
 
-    if (!duePrayer) continue;
+  for (const entry of entries) {
 
     try {
-      await sendPush(env, record.subscription, {
-        title: `حان وقت ${LABELS[duePrayer.key]}`,
+
+      await sendPush(env, entry.subscription, {
+        title: entry.title,
         options: {
-          body: `${LABELS[duePrayer.key]} — ${duePrayer.timeText}`,
-          icon: "./icons/icon-192.png",
-          badge: "./icons/icon-192.png",
-          tag: `prayer-${duePrayer.key}-${duePrayer.dateKey}`,
-          renotify: false,
-        },
+          body: entry.body,
+          tag: entry.tag,
+          icon: "./icon-192.png",
+          badge: "./icon-192.png"
+        }
       });
 
-      record.lastSent = {
-        prayer: duePrayer.key,
-        date: duePrayer.dateKey,
-        sentAt: new Date().toISOString(),
-      };
+    } catch (err) {
 
-      await env.SUBSCRIPTIONS.put(item.name, JSON.stringify(record));
-    } catch (error) {
-      const msg = String(error?.message || error);
+      const msg = String(err?.message || err);
+
       if (msg.includes("410") || msg.includes("404")) {
-        await env.SUBSCRIPTIONS.delete(item.name);
+        // subscription expired
       }
+
     }
+
   }
+
+  await env.SUBSCRIPTIONS.delete(bucketKey);
+
 }
 
 async function sendPush(env, subscription, payload) {
@@ -747,4 +747,58 @@ function zonedLocalToUtcIso(localDateTimeString, timeZone) {
 
 }
 
+async function buildInitialBuckets(env, record) {
+
+  for (let i = 0; i < 7; i++) {
+
+    const date = new Date();
+    date.setDate(date.getDate() + i);
+
+    const prayers = calculatePrayersForDate(date, record);
+
+    for (const p of prayers) {
+
+      const bucketKey = bucketKeyFromDate(p.utc);
+
+      const entry = {
+        id: crypto.randomUUID(),
+        type: "prayer",
+        subscription: record.subscription,
+        title: p.title,
+        body: p.body,
+        tag: p.tag,
+        dueAt: p.utc.toISOString()
+      };
+
+      const raw = await env.SUBSCRIPTIONS.get(bucketKey);
+
+      let arr = [];
+
+      if (raw) {
+        try {
+          arr = JSON.parse(raw);
+        } catch {}
+      }
+
+      arr.push(entry);
+
+      await env.SUBSCRIPTIONS.put(bucketKey, JSON.stringify(arr));
+
+    }
+
+  }
+
+}
+
+function bucketKeyFromDate(date) {
+
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(date.getUTCDate()).padStart(2, "0");
+  const h = String(date.getUTCHours()).padStart(2, "0");
+  const min = String(date.getUTCMinutes()).padStart(2, "0");
+
+  return `bucket:${y}${m}${d}T${h}${min}Z`;
+
+}
 
