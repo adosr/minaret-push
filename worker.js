@@ -364,21 +364,8 @@ async function runScheduled(env) {
         },
       });
 
-      if (entry.subKey) {
-        const rawSub = await env.SUBSCRIPTIONS.get(entry.subKey);
-        if (rawSub) {
-          try {
-            const record = JSON.parse(rawSub);
-            record.lastSent = {
-              prayer: entry.prayer || "manual",
-              date: entry.dateKey || localDateKey(new Date()),
-              sentAt: new Date().toISOString(),
-            };
-            await env.SUBSCRIPTIONS.put(entry.subKey, JSON.stringify(record));
-          } catch {
-            // ignore
-          }
-        }
+      if (entry.type === "prayer-push") {
+        await scheduleNextPrayerFromEntry(env, entry);
       }
     } catch (err) {
       const msg = String(err?.message || err);
@@ -558,6 +545,13 @@ function createPrayerBucketEntriesForRecord(subKey, record, daysAhead = 7) {
           tag: p.tag,
           renotify: false,
           scheduleVersion: record.scheduleVersion,
+
+          // snapshot scheduling context
+          lat: record.lat,
+          lon: record.lon,
+          timezone: record.timezone,
+          language: record.language === "en" ? "en" : "ar",
+          settings: sanitizeSettings(record.settings),
         },
       });
     }
@@ -565,7 +559,6 @@ function createPrayerBucketEntriesForRecord(subKey, record, daysAhead = 7) {
 
   return result;
 }
-
 function calculatePrayersForDateParts(dateParts, record) {
   const date = new Date(Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day, 12, 0, 0));
 
@@ -844,6 +837,73 @@ async function safeJson(request) {
   }
 }
 
+async function scheduleNextPrayerFromEntry(env, entry) {
+  const nextDateParts = addDaysToDateParts(parseDateKey(entry.dateKey), 7);
+  const next = createPrayerBucketEntryFromSnapshot(nextDateParts, entry);
+
+  if (!next) return;
+
+  await upsertBucketEntries(env, next.bucketKey, [next.entry]);
+}
+
+function createPrayerBucketEntryFromSnapshot(dateParts, snapshot) {
+  const recordLike = {
+    lat: snapshot.lat,
+    lon: snapshot.lon,
+    timezone: snapshot.timezone,
+    language: snapshot.language,
+    settings: sanitizeSettings(snapshot.settings),
+    subscription: snapshot.subscription,
+    scheduleVersion: snapshot.scheduleVersion,
+  };
+
+  const prayerEntries = calculatePrayersForDateParts(dateParts, recordLike);
+  const p = prayerEntries.find((item) => item.prayer === snapshot.prayer);
+
+  if (!p) return null;
+
+  return {
+    bucketKey: bucketKeyFromIso(p.dueAt),
+    entry: {
+      id: `prayer:${snapshot.subKey}:${p.dateKey}:${p.prayer}:v${snapshot.scheduleVersion}`,
+      type: "prayer-push",
+      subKey: snapshot.subKey,
+      prayer: p.prayer,
+      dateKey: p.dateKey,
+      dueAt: p.dueAt,
+      subscription: snapshot.subscription,
+      title: p.title,
+      body: p.body,
+      tag: p.tag,
+      renotify: false,
+      scheduleVersion: snapshot.scheduleVersion,
+
+      // snapshot scheduling context
+      lat: snapshot.lat,
+      lon: snapshot.lon,
+      timezone: snapshot.timezone,
+      language: snapshot.language === "en" ? "en" : "ar",
+      settings: sanitizeSettings(snapshot.settings),
+    },
+  };
+}
+
+function parseDateKey(dateKey) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  return { year, month, day };
+}
+
+function addDaysToDateParts(dateParts, days) {
+  const d = new Date(Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day, 12, 0, 0));
+  d.setUTCDate(d.getUTCDate() + days);
+
+  return {
+    year: d.getUTCFullYear(),
+    month: d.getUTCMonth() + 1,
+    day: d.getUTCDate(),
+  };
+}
+
 async function subscriptionKey(endpoint) {
   const bytes = new TextEncoder().encode(endpoint);
   const hashBuffer = await crypto.subtle.digest("SHA-256", bytes);
@@ -877,3 +937,4 @@ function fixAngle(a) {
 function fixHour(h) {
   return (h % 24 + 24) % 24;
 }
+
